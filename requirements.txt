@@ -1,0 +1,14 @@
+# Native Google GenAI SDK (supports ThinkingConfig.thinking_level & AFC control)
+google-genai>=1.51.0,<3.0.0
+
+# Universal OpenAI SDK (for OpenAI, DeepSeek, Groq, Ollama, OpenRouter)
+openai>=1.40.0
+
+# Native Anthropic SDK (for Claude with Extended Thinking & signature preservation)
+anthropic>=0.49.0
+
+# Terminal UI and Markdown Rendering
+rich>=13.7.0
+
+# Cross-platform Arrow Keys and History (Windows only)
+pyreadline3>=3.4.1; sys_platform == "win32"
