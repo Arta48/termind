@@ -13,8 +13,10 @@ Key Capabilities:
 - Live Markdown rendering with Rich and persistent readline command history
 """
 
+import asyncio
 import atexit
 import base64
+from contextlib import AsyncExitStack
 import copy
 from dataclasses import dataclass, field
 import html as html_lib
@@ -109,6 +111,8 @@ MAX_WEB_FETCH_BYTES = 512 * 1024
 MAX_WEB_TEXT_CHARS = 6000
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_ATTACH_TEXT_CHARS = 200_000
+MAX_MCP_TOOL_NAME_LEN = 64
+MCP_CALL_TIMEOUT_SEC = 120.0
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 BINARY_EXTENSIONS = (
@@ -254,6 +258,11 @@ def build_system_prompt(announce_rules: bool = False) -> str:
         "3. Use 'view_image' whenever you need to visually inspect local images, screenshots, or diagrams.\n"
         f"4. Be concise, accurate, and respect the current OS ({OS_NAME}).\n"
     )
+
+    mcp_summary = mcp_manager.get_prompt_summary()
+    if mcp_summary:
+        prompt += mcp_summary
+
     prompt += load_project_rules(announce=announce_rules)
     if state.session_summary:
         prompt += f"\nPrevious Session Summary:\n{state.session_summary}\n"
@@ -1011,14 +1020,324 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
     },
 ]
 
+class MCPManager:
+    """Manages optional MCP servers (stdio & Streamable HTTP) over a background asyncio loop."""
+
+    def __init__(self) -> None:
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._configs: Dict[str, Tuple[Dict[str, Any], str]] = {}  # name -> (cfg, source_label)
+        self._stacks: Dict[str, AsyncExitStack] = {}
+        self._sessions: Dict[str, Any] = {}
+        self._tools: Dict[str, Tuple[str, str, str, Dict[str, Any]]] = {}  # exposed -> (server, orig_name, desc, schema)
+
+    @staticmethod
+    def is_available() -> bool:
+        try:
+            import mcp  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is None or not self._loop.is_running():
+                ready = threading.Event()
+
+                def _runner() -> None:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    self._loop = loop
+                    ready.set()
+                    loop.run_forever()
+
+                self._thread = threading.Thread(target=_runner, daemon=True, name="termind-mcp")
+                self._thread.start()
+                ready.wait()
+            return self._loop  # type: ignore[return-value]
+
+    def _run_coro(self, coro: Any, timeout: float = 30.0) -> Any:
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
+
+    def discover_configs(self) -> Tuple[List[str], List[str]]:
+        """Loads ~/.termind/mcp.json (trusted) and returns any workspace-local server names separately."""
+        self._configs.clear()
+        global_names: List[str] = []
+        local_names: List[str] = []
+
+        candidates = [
+            (os.path.expanduser("~/.termind/mcp.json"), "global", False),
+            (os.path.join(WORKSPACE_DIR, ".mcp.json"), "workspace", True),
+        ]
+        for cfg_path, label, is_local in candidates:
+            if not os.path.isfile(cfg_path):
+                continue
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                servers = data.get("mcpServers") or data.get("servers") or {}
+                if not isinstance(servers, dict):
+                    continue
+                for name, srv_cfg in servers.items():
+                    if isinstance(srv_cfg, dict) and not srv_cfg.get("disabled", False):
+                        self._configs[name] = (srv_cfg, label)
+                        (local_names if is_local else global_names).append(name)
+            except Exception as e:
+                print(f"\033[93m[Warning: Failed to parse {cfg_path}: {e}]\033[0m")
+
+        return global_names, local_names
+
+    @staticmethod
+    def _sanitize_tool_name(server: str, tool_name: str) -> str:
+        s_clean = re.sub(r"[^a-zA-Z0-9_-]", "_", server)
+        t_clean = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_name)
+        candidate = f"mcp__{s_clean}__{t_clean}"
+        return candidate[:MAX_MCP_TOOL_NAME_LEN]
+
+    async def _async_connect(self, name: str, cfg: Dict[str, Any]) -> List[str]:
+        import httpx2
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mcp.client.streamable_http import streamable_http_client
+
+        if name in self._stacks:
+            await self._async_disconnect(name)
+
+        stack = AsyncExitStack()
+        try:
+            if "url" in cfg:
+                url = str(cfg["url"])
+                headers = cfg.get("headers") or {}
+                http_client = None
+                if headers:
+                    http_client = await stack.enter_async_context(
+                        httpx2.AsyncClient(
+                            headers={str(k): str(v) for k, v in headers.items()},
+                            timeout=httpx2.Timeout(30, read=300),
+                        )
+                    )
+                read_s, write_s, *_ = await stack.enter_async_context(
+                    streamable_http_client(url, http_client=http_client)
+                )
+            elif "command" in cfg:
+                raw_env = cfg.get("env")
+                env_dict = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else None
+                raw_cwd = cfg.get("cwd")
+                cwd_path = os.path.realpath(os.path.join(WORKSPACE_DIR, raw_cwd)) if raw_cwd else WORKSPACE_DIR
+                params = StdioServerParameters(
+                    command=str(cfg["command"]),
+                    args=[str(a) for a in (cfg.get("args") or [])],
+                    env=env_dict,
+                    cwd=cwd_path,
+                )
+                read_s, write_s = await stack.enter_async_context(stdio_client(params))
+            else:
+                raise ValueError("Server config must contain either 'command' or 'url'.")
+
+            session = await stack.enter_async_context(ClientSession(read_s, write_s))
+            await session.initialize()
+            tools_resp = await session.list_tools()
+
+            self._stacks[name] = stack
+            self._sessions[name] = session
+
+            added: List[str] = []
+            for tool in tools_resp.tools:
+                exposed = self._sanitize_tool_name(name, tool.name)
+                suffix_idx = 2
+                while exposed in self._tools and self._tools[exposed][:2] != (name, tool.name):
+                    suffix = f"_{suffix_idx}"
+                    exposed = exposed[: MAX_MCP_TOOL_NAME_LEN - len(suffix)] + suffix
+                    suffix_idx += 1
+
+                schema = dict(tool.input_schema or {"type": "object", "properties": {}})
+                schema.setdefault("type", "object")
+                desc = f"[MCP:{name}] {tool.description or tool.name}"
+                self._tools[exposed] = (name, tool.name, desc, schema)
+                added.append(exposed)
+            return added
+        except Exception:
+            await stack.aclose()
+            raise
+
+    async def _async_disconnect(self, name: str) -> None:
+        self._sessions.pop(name, None)
+        for k in [k for k, v in self._tools.items() if v[0] == name]:
+            self._tools.pop(k, None)
+        stack = self._stacks.pop(name, None)
+        if stack is not None:
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+
+    def connect(self, name: str) -> Tuple[bool, str]:
+        if not self.is_available():
+            return False, "MCP SDK not installed. Run: pip install mcp (requires Python 3.11+)."
+        if name not in self._configs:
+            return False, f"Unknown MCP server '{name}'."
+        cfg, _ = self._configs[name]
+        try:
+            added = self._run_coro(self._async_connect(name, cfg), timeout=45.0)
+            return True, f"Connected '{name}' ({len(added)} tools)"
+        except Exception as e:
+            return False, f"Failed to connect '{name}': {e}"
+
+    def disconnect(self, name: str) -> str:
+        if name not in self._sessions and name not in self._stacks:
+            return f"Server '{name}' is not connected."
+        try:
+            self._run_coro(self._async_disconnect(name), timeout=15.0)
+        except Exception:
+            pass
+        return f"Disconnected '{name}'."
+
+    def connect_on_startup(self) -> None:
+        global_names, local_names = self.discover_configs()
+        if not (global_names or local_names) or not self.is_available():
+            return
+
+        for name in global_names:
+            ok, msg = self.connect(name)
+            color = "92" if ok else "93"
+            print(f"\033[{color}m[MCP] {msg}\033[0m")
+
+        if local_names:
+            print(f"\n\033[93m[⚠️ WORKSPACE MCP CONFIG DETECTED]: {', '.join(local_names)}\033[0m")
+            for name in local_names:
+                cfg, _ = self._configs[name]
+                preview = cfg.get("url") or f"{cfg.get('command')} {' '.join(cfg.get('args') or [])}"
+                if ask_user_permission(f"Start workspace MCP server '{name}'", str(preview)):
+                    ok, msg = self.connect(name)
+                    color = "92" if ok else "93"
+                    print(f"\033[{color}m[MCP] {msg}\033[0m")
+
+    def has_tool(self, exposed_name: str) -> bool:
+        return exposed_name in self._tools
+
+    def call_tool(self, exposed_name: str, fn_args: Dict[str, Any]) -> str:
+        server_name, orig_name, _, _ = self._tools[exposed_name]
+        session = self._sessions.get(server_name)
+        if session is None:
+            return f"Error: MCP server '{server_name}' is disconnected."
+
+        details = json.dumps(fn_args, ensure_ascii=False, indent=2) if fn_args else "(no arguments)"
+        if not ask_user_permission(f"MCP Tool [{server_name}]: {orig_name}", details):
+            return "Cancelled by user: MCP tool execution rejected."
+
+        async def _invoke() -> Any:
+            return await session.call_tool(orig_name, arguments=fn_args)
+
+        try:
+            print(f"\n\033[94m[MCP Call: {server_name}.{orig_name}]\033[0m")
+            res = self._run_coro(_invoke(), timeout=MCP_CALL_TIMEOUT_SEC)
+            parts: List[str] = []
+            for item in res.content or []:
+                if getattr(item, "text", None) is not None:
+                    parts.append(str(item.text))
+                elif getattr(item, "type", "") == "image":
+                    parts.append(f"[Image returned: {getattr(item, 'mime_type', None) or 'image/*'}]")
+                else:
+                    parts.append(str(item))
+            text_out = "\n".join(parts).strip() or "(no output)"
+            if len(text_out) > MAX_SHELL_OUTPUT_CHARS:
+                text_out = text_out[:4000] + "\n... [MCP output truncated] ...\n" + text_out[-(MAX_SHELL_OUTPUT_CHARS - 4000):]
+            if res.is_error:
+                return f"MCP Tool Error:\n{text_out}"
+            return text_out
+        except Exception as e:
+            return f"MCP tool call failed: {e}"
+
+    def get_openai_schemas(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": exposed,
+                    "description": desc,
+                    "parameters": schema,
+                },
+            }
+            for exposed, (_, _, desc, schema) in self._tools.items()
+        ]
+
+    def get_gemini_declarations(self, types_mod: Any) -> List[Any]:
+        decls = []
+        for exposed, (_, _, desc, schema) in self._tools.items():
+            decls.append(
+                types_mod.FunctionDeclaration(
+                    name=exposed,
+                    description=desc,
+                    parameters_json_schema=schema,
+                )
+            )
+        return decls
+
+    def get_prompt_summary(self) -> str:
+        if not self._sessions:
+            return ""
+        lines = ["\nConnected External MCP Tools:"]
+        for exposed, (srv, orig, desc, _) in self._tools.items():
+            lines.append(f"- {exposed} (server '{srv}', tool '{orig}'): {desc[:120]}")
+        return "\n".join(lines) + "\n"
+
+    def status_report(self) -> str:
+        if not self.is_available():
+            return "MCP Python SDK is not installed. Install with: pip install mcp (requires Python 3.11+)."
+        if not self._configs:
+            return "No MCP servers configured. Add servers to ~/.termind/mcp.json or ./.mcp.json."
+        lines = ["MCP Servers:"]
+        for name, (cfg, label) in self._configs.items():
+            connected = name in self._sessions
+            t_count = sum(1 for v in self._tools.values() if v[0] == name)
+            target = cfg.get("url") or cfg.get("command", "?")
+            mark = f"CONNECTED ({t_count} tools)" if connected else "disconnected"
+            lines.append(f"  • {name} [{label}] ({target}) — {mark}")
+        return "\n".join(lines)
+
+    def disconnect_all(self) -> None:
+        """Closes all active MCP sessions while keeping the background event loop alive."""
+        if self._loop is None or not self._loop.is_running():
+            return
+
+        async def _close_all() -> None:
+            for name in list(self._stacks.keys()):
+                await self._async_disconnect(name)
+
+        try:
+            self._run_coro(_close_all(), timeout=10.0)
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        self.disconnect_all()
+        if self._loop is not None and self._loop.is_running():
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except Exception:
+                pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        with self._lock:
+            self._loop = None
+            self._thread = None
+
+
+mcp_manager = MCPManager()
+
 
 def execute_tool_call(fn_name: str, fn_args: Any) -> str:
-    """Safely invokes a registered tool function with validated dictionary arguments."""
+    """Safely invokes a built-in or connected MCP tool with validated arguments."""
+    if not isinstance(fn_args, dict):
+        return f"Error: tool arguments for '{fn_name}' must be a JSON object."
+    if mcp_manager.has_tool(fn_name):
+        return mcp_manager.call_tool(fn_name, fn_args)
     tool_fn = TOOLS_MAP.get(fn_name)
     if not tool_fn:
         return f"Error: unknown tool '{fn_name}'"
-    if not isinstance(fn_args, dict):
-        return f"Error: tool arguments for '{fn_name}' must be a JSON object."
     try:
         return str(tool_fn(**fn_args))
     except Exception as e:
@@ -1268,9 +1587,24 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
     try:
         for _step in range(MAX_TOOL_STEPS):
             thinking_cfg = build_gemini_thinking_config(types, state.model, state.thinking_level)
+            mcp_decls = mcp_manager.get_gemini_declarations(types)
+            gemini_tools: List[Any]
+            if mcp_decls:
+                native_decls = [
+                    types.FunctionDeclaration.from_callable(
+                        client=client,
+                        callable=fn,
+                        use_json_schema=True,
+                    )
+                    for fn in NATIVE_TOOLS_LIST
+                ]
+                gemini_tools = [types.Tool(function_declarations=native_decls + mcp_decls)]
+            else:
+                gemini_tools = NATIVE_TOOLS_LIST
+
             cfg_kwargs: Dict[str, Any] = {
                 "system_instruction": build_system_prompt(),
-                "tools": NATIVE_TOOLS_LIST,
+                "tools": gemini_tools,
                 "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
             }
             if thinking_cfg is not None:
@@ -1566,6 +1900,7 @@ def run_openai_or_anthropic_turn(user_content: Any, allow_tools: bool = True) ->
 
     try:
         for _step in range(MAX_TOOL_STEPS):
+            active_schemas = TOOLS_SCHEMAS + mcp_manager.get_openai_schemas()
             attempt_succeeded = False
             full_text = ""
             reasoning_text = ""
@@ -1598,7 +1933,7 @@ def run_openai_or_anthropic_turn(user_content: Any, allow_tools: bool = True) ->
                             "messages": prepare_openai_messages(
                                 state.universal_history, state.provider, include_reasoning=include_reasoning_hist
                             ),
-                            "tools": TOOLS_SCHEMAS,
+                            "tools": active_schemas,
                             "stream": True,
                             "stream_options": {"include_usage": True},
                         }
@@ -1702,7 +2037,7 @@ def run_openai_or_anthropic_turn(user_content: Any, allow_tools: bool = True) ->
                                 "description": t["function"]["description"],
                                 "input_schema": t["function"]["parameters"],
                             }
-                            for t in TOOLS_SCHEMAS
+                            for t in active_schemas
                         ]
                         sys_msg, anthropic_msgs = convert_history_for_anthropic(state.universal_history)
 
@@ -1921,9 +2256,10 @@ def print_banner(show_header: bool = True) -> None:
     print("  • /key <api_key>    — set API key for active provider (or 'reset')")
     print("  • /base_url <url>   — set custom endpoint URL for active provider (or 'reset')")
     print("  • /yolo             — toggle auto-approval mode [y/N]")
+    print("  • /file <path>      — attach image (Vision) or text/code file")
+    print("  • /mcp [cmd]        — manage MCP plugins: status, connect <name>, disconnect <name>, reload")
     print("  • /reset            — clear conversation memory")
     print("  • /compact          — summarize and compact chat history")
-    print("  • /file <path>      — attach image (Vision) or text/code file")
     print("  • /help             — show this command list")
     print("  • \"\"\"               — enter multiline paste mode")
     print("  • exit              — quit")
@@ -2020,6 +2356,8 @@ def read_multiline_input(initial_text: str) -> Optional[str]:
 def main() -> None:
     """Initializes terminal history, project rules, and runs the interactive agent REPL."""
     setup_readline_history()
+    atexit.register(mcp_manager.shutdown)
+    mcp_manager.connect_on_startup()
     reset_conversation(announce_rules=True)
     print_banner(show_header=True)
 
@@ -2135,6 +2473,45 @@ def main() -> None:
             payload = handle_file_attachment(user_input)
             if payload is not None:
                 run_agent_turn(payload)
+            continue
+
+        if cmd == "/mcp":
+            sub_parts = arg.split(maxsplit=1)
+            sub_cmd = sub_parts[0].lower() if sub_parts else "status"
+            sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+            if sub_cmd == "status":
+                print(f"\n{mcp_manager.status_report()}")
+            elif sub_cmd == "reload":
+                mcp_manager.disconnect_all()
+                mcp_manager.connect_on_startup()
+                refresh_active_session()
+            elif sub_cmd == "connect":
+                if not sub_arg:
+                    print("\n[Usage: /mcp connect <server_name|all>]")
+                elif sub_arg.lower() == "all":
+                    mcp_manager.discover_configs()
+                    for srv in list(mcp_manager._configs.keys()):
+                        _, msg = mcp_manager.connect(srv)
+                        print(f"[MCP] {msg}")
+                    refresh_active_session()
+                else:
+                    mcp_manager.discover_configs()
+                    _, msg = mcp_manager.connect(sub_arg)
+                    print(f"\n[MCP] {msg}")
+                    refresh_active_session()
+            elif sub_cmd == "disconnect":
+                if not sub_arg:
+                    print("\n[Usage: /mcp disconnect <server_name|all>]")
+                elif sub_arg.lower() == "all":
+                    for srv in list(mcp_manager._sessions.keys()):
+                        print(f"[MCP] {mcp_manager.disconnect(srv)}")
+                    refresh_active_session()
+                else:
+                    print(f"\n[MCP] {mcp_manager.disconnect(sub_arg)}")
+                    refresh_active_session()
+            else:
+                print("\n[Usage: /mcp [status|connect <name|all>|disconnect <name|all>|reload]]")
             continue
 
         if user_input.startswith('"""') or user_input.startswith("'''"):

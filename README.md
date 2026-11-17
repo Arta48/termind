@@ -29,6 +29,9 @@ A cross-platform, multi-provider autonomous AI engineering assistant for your te
   * Multiline paste mode (`"""`) and smart `/file` path parsing (supports quotes, spaces, and drag-and-drop escapes).
   * Automatic project rules loading from `.agentrules`, `.cursorrules`, or `PROJECT.md`.
   * Per-turn token usage reporting, graceful `Ctrl+C` turn interruption with history rollback, and exponential backoff retries on `429` / `503` / `529` errors.
+* **MCP Plugin Support (Optional):**
+  * Connects to external **Model Context Protocol (MCP v2)** servers over `stdio` or `Streamable HTTP` via `~/.termind/mcp.json` or project-local `.mcp.json`.
+  * Dynamically registers external tools (`mcp__<server>__<tool>`) across Gemini, OpenAI, DeepSeek, and Anthropic engines with `[y/N]` execution confirmations.
 
 ---
 
@@ -47,6 +50,8 @@ A cross-platform, multi-provider autonomous AI engineering assistant for your te
 ---
 
 ## Installation
+
+> **Prerequisites:** Python 3.11+
 
 1. **Clone the repository:**
    ```bash
@@ -119,6 +124,7 @@ python termind.py
 | `/base_url <url>` | Set a per-provider custom endpoint URL (use `/base_url reset` to clear). |
 | `/yolo` | Toggle auto-approval mode (skips `[y/N]` confirmation prompts). |
 | `/file <path> [prompt]` | Attach a local image (Vision) or text/source file directly to your message. |
+| `/mcp [cmd]` | Manage MCP servers (`status`, `connect <name\|all>`, `disconnect <name\|all>`, `reload`). |
 | `/compact` | Summarize the current session (without tool calls) and reset history while preserving the summary. |
 | `/reset` | Clear the entire conversation memory and session summary. |
 | `/help` | Display the list of interactive commands. |
@@ -140,9 +146,35 @@ Example `.agentrules`:
 
 ---
 
+## MCP Plugins (Optional)
+
+Termind supports external tools via **MCP v2** (`mcp>=2.2.0`).
+
+Configure servers in your global config **`~/.termind/mcp.json`** (auto-connected at startup) or in a project-local **`.mcp.json`** (prompts for permission before launching):
+
+```json
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "./data.db"]
+    },
+    "remote-docs": {
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Security Notes
 
 * **Workspace Isolation:** File and search tools cannot access paths outside the directory from which `termind.py` was started, including via `../` traversal or symbolic links.
 * **Active-Provider Privacy:** `view_image` always uses your currently selected provider and never falls back to external cloud vision APIs behind your back.
 * **Shell Execution & YOLO Mode Caution:** Enabling `/yolo` allows the agent to run shell commands and modify or delete files inside the workspace without asking `[y/N]`. Note that shell commands inherit the process environment and are not OS-containerized—use `/yolo` only in trusted workspaces backed by version control.
 * **Protect Your Keys:** Never commit API keys or `.env` files to public repositories.
+* **Workspace MCP Verification:** Project-local `.mcp.json` servers are never started silently—Termind always asks for explicit authorization before launching them, and individual MCP tool calls require `[y/N]` confirmation unless `/yolo` is enabled.

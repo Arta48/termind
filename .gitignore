@@ -29,6 +29,7 @@ dist/
 *.key
 *.pem
 *.log
+.mcp.json
 
 # Editors & IDEs
 .vscode/
