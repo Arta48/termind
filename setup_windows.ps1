@@ -91,7 +91,11 @@ if ($Uninstall) {
 # ---------------------------------------------------------------------
 # PRE-CHECKS & PYTHON 3.11+ DISCOVERY
 # ---------------------------------------------------------------------
-foreach ($reqFile in @("termind.py", "requirements.txt", "README.md", "LICENSE")) {
+if (-not (Test-Path "termind" -PathType Container)) {
+    Write-Error "Error: 'termind' package directory not found. Run this script from the root of the termind repository!"
+    exit 1
+}
+foreach ($reqFile in @("pyproject.toml", "README.md", "LICENSE")) {
     if (-not (Test-Path $reqFile)) {
         Write-Error "Error: '$reqFile' not found. Run this script from the root of the termind repository!"
         exit 1
@@ -170,7 +174,7 @@ Write-Host "[*] Installing Termind into $InstallDir ..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir     | Out-Null
 
-Copy-Item "termind.py", "requirements.txt", "README.md", "LICENSE" -Destination $InstallDir -Force
+Copy-Item "pyproject.toml", "README.md", "LICENSE" -Destination $InstallDir -Force
 
 # ---------------------------------------------------------------------
 # 2. CREATE ISOLATED VENV & INSTALL DEPENDENCIES
@@ -185,16 +189,32 @@ if (-not (Test-Path (Join-Path $VenvDir "Scripts\python.exe"))) {
 }
 
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-Write-Host "[*] Installing dependencies from requirements.txt ..." -ForegroundColor Cyan
-& $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install -r (Join-Path $InstallDir "requirements.txt")
+$BuildDir = Join-Path ([System.IO.Path]::GetTempPath()) "termind-build-$PID"
+if (Test-Path $BuildDir) {
+    Remove-Item -Recurse -Force $BuildDir
+}
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+try {
+    Copy-Item "termind" -Destination $BuildDir -Recurse -Force
+    Get-ChildItem -Path (Join-Path $BuildDir "termind") -Directory -Recurse -Filter "__pycache__" | Remove-Item -Recurse -Force
+    Copy-Item "pyproject.toml", "README.md", "LICENSE" -Destination $BuildDir -Force
+
+    Write-Host "[*] Installing Termind and dependencies from pyproject.toml ..." -ForegroundColor Cyan
+    & $VenvPython -m pip install --upgrade pip
+    & $VenvPython -m pip install $BuildDir
+} finally {
+    if (Test-Path $BuildDir) {
+        Remove-Item -Recurse -Force $BuildDir
+    }
+}
 
 # ---------------------------------------------------------------------
 # 3. CREATE GLOBAL LAUNCHER (termind.cmd WITHOUT UTF-8 BOM)
 # ---------------------------------------------------------------------
-$LauncherPath = Join-Path $BinDir "termind.cmd"
-$LauncherContent = "@echo off`r`nset PYTHONUTF8=1`r`n`"$VenvPython`" `"$InstallDir\termind.py`" %*`r`n"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$LauncherPath = Join-Path $BinDir "termind.cmd"
+$LauncherContent = "@echo off`r`nset PYTHONUTF8=1`r`n`"$VenvPython`" -P -m termind %*`r`n"
 [System.IO.File]::WriteAllText($LauncherPath, $LauncherContent, $Utf8NoBom)
 
 # ---------------------------------------------------------------------

@@ -84,14 +84,14 @@ A cross-platform, multi-provider autonomous AI engineering assistant for your te
      ```bash
      python3 -m venv .venv
      source .venv/bin/activate
-     pip install -r requirements.txt
+     pip install -e .
      ```
 
    * **Windows (PowerShell):**
      ```powershell
      python -m venv .venv
      .\.venv\Scripts\Activate.ps1
-     pip install -r requirements.txt
+     pip install -e .
      ```
 
 ---
@@ -160,7 +160,7 @@ Navigate to any project directory you want Termind to work in (this directory be
 
 * **If running manually from the repository:**
   ```bash
-  python /path/to/termind.py
+  PYTHONPATH=/path/to/termind python -P -m termind
   ```
 
 ### Interactive Commands
@@ -224,7 +224,7 @@ Configure servers in your global config **`~/.termind/mcp.json`** (auto-connecte
 
 ## Security Notes
 
-* **Workspace Isolation:** File and search tools cannot access paths outside the directory from which `termind.py` was started, including via `../` traversal or symbolic links.
+* **Workspace Isolation:** File and search tools cannot access paths outside the directory in which `termind` was started (or passed as an argument), including via `../` traversal or symbolic links.
 * **Active-Provider Privacy:** `view_image` always uses your currently selected provider and never falls back to external cloud vision APIs behind your back.
 * **Shell Execution & YOLO Mode Caution:** Enabling `/yolo` allows the agent to run shell commands and modify or delete files inside the workspace without asking `[y/N]`. Note that shell commands inherit the process environment and are not OS-containerized—use `/yolo` only in trusted workspaces backed by version control.
 * **Protect Your Keys:** Never commit API keys or `.env` files to public repositories. Keys set with `/key` are stored strictly in `~/.termind/config.json` (outside project directories), never inside workspace folders.

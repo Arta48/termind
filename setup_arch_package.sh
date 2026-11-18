@@ -6,7 +6,7 @@ if [[ "$(uname)" != "Linux" ]] || ! command -v pacman > /dev/null; then
     exit 1
 fi
 
-if [[ ! -f termind.py ]] || [[ ! -f LICENSE ]] || [[ ! -f README.md ]]; then
+if [[ ! -d termind ]] || [[ ! -f pyproject.toml ]] || [[ ! -f LICENSE ]] || [[ ! -f README.md ]]; then
     echo "Error: Run this script from the root of the termind repository!"
     exit 1
 fi
@@ -17,7 +17,8 @@ sudo echo > /dev/null
 # 1. Prepare clean staging directory
 rm -rf termind_pkg
 mkdir -p termind_pkg
-cp termind.py README.md LICENSE termind_pkg/
+tar --exclude='__pycache__' --exclude='*.py[cod]' -czf termind_pkg/termind-src.tar.gz termind pyproject.toml
+cp README.md LICENSE termind_pkg/
 cd termind_pkg
 
 export PACKAGER="Arta <arta@gmail.com>"
@@ -46,7 +47,7 @@ optdepends=(
     "uv: run Python MCP servers via uvx"
 )
 source=(
-    "termind.py"
+    "termind-src.tar.gz"
     "README.md"
     "LICENSE"
 )
@@ -98,7 +99,8 @@ package() {
     cd "${srcdir}"
 
     # Installing application files in /opt
-    install -Dm755 termind.py "${pkgdir}/opt/${pkgname}/termind.py"
+    find termind -type f -name '*.py' -exec install -Dm644 {} "${pkgdir}/opt/${pkgname}/{}" \;
+    install -Dm644 pyproject.toml "${pkgdir}/opt/${pkgname}/pyproject.toml"
     install -Dm644 README.md "${pkgdir}/opt/${pkgname}/README.md"
 
     # Installing MIT license
@@ -106,7 +108,7 @@ package() {
 
     # Creating launcher executable in /usr/bin
     install -d "${pkgdir}/usr/bin"
-    printf '#!/bin/sh\nexec python /opt/%s/termind.py "$@"\n' "${pkgname}" > "${pkgdir}/usr/bin/${pkgname}"
+    printf '#!/bin/sh\nexec python -P -c "import sys; sys.path.insert(0, '\''/opt/%s'\''); from termind.cli import main; main()" "$@"\n' "${pkgname}" > "${pkgdir}/usr/bin/${pkgname}"
     chmod 755 "${pkgdir}/usr/bin/${pkgname}"
 
     # Installing desktop file
