@@ -8,6 +8,7 @@ import threading
 from typing import Any, Dict, List, Optional, Union
 
 from ..config import DANGEROUS_COMMANDS, IS_WINDOWS, MAX_SHELL_OUTPUT_CHARS, OS_NAME, state
+from ..rpc import is_rpc_cancelled, rpc_check_cancelled, rpc_emit, wait_rpc_cancel
 from ..security import ask_user_permission
 
 
@@ -24,10 +25,13 @@ def execute_shell_command(command: str) -> str:
     timed_out = threading.Event()
     process: Optional[subprocess.Popen[str]] = None
 
-    def _kill_process_tree() -> None:
+    cancel_stop = threading.Event()
+
+    def _kill_process_tree(is_timeout: bool = False) -> None:
         if process is None or process.poll() is not None:
             return
-        timed_out.set()
+        if is_timeout:
+            timed_out.set()
         try:
             if IS_WINDOWS:
                 subprocess.run(
@@ -43,10 +47,19 @@ def execute_shell_command(command: str) -> str:
             except Exception:
                 pass
 
-    timer = threading.Timer(timeout_sec, _kill_process_tree)
+    def _watch_rpc_cancel() -> None:
+        while not cancel_stop.is_set():
+            if wait_rpc_cancel(0.25):
+                _kill_process_tree(is_timeout=False)
+                return
+
+    timer = threading.Timer(timeout_sec, _kill_process_tree, kwargs={"is_timeout": True})
+    cancel_thread: Optional[threading.Thread] = None
 
     try:
-        print(f"\n\033[94m[Running command ({OS_NAME})]: $ {command}\033[0m")
+        if not state.rpc_mode:
+            print(f"\n\033[94m[Running command ({OS_NAME})]: $ {command}\033[0m")
+
         popen_kwargs: Dict[str, Any] = {
             "cwd": state.workspace_dir,
             "stdin": subprocess.DEVNULL,
@@ -75,14 +88,28 @@ def execute_shell_command(command: str) -> str:
 
         process = subprocess.Popen(cmd_target, **popen_kwargs)
         timer.start()
+        if state.rpc_mode:
+            cancel_thread = threading.Thread(target=_watch_rpc_cancel, daemon=True)
+            cancel_thread.start()
 
         output_lines: List[str] = []
         if process.stdout:
-            for line in process.stdout:
-                print(line, end="", flush=True)
-                output_lines.append(line)
+            rpc_emit({"type": "shell_start", "command": command})
+            try:
+                for line in process.stdout:
+                    if state.rpc_mode:
+                        if is_rpc_cancelled():
+                            _kill_process_tree(is_timeout=False)
+                            break
+                        rpc_emit({"type": "shell_output", "line": line})
+                    else:
+                        print(line, end="", flush=True)
+                    output_lines.append(line)
+            finally:
+                rpc_emit({"type": "shell_end", "command": command})
+
         process.wait()
-        timer.cancel()
+        rpc_check_cancelled()
 
         if timed_out.is_set():
             return f"Error: command timed out after {int(timeout_sec)}s and was terminated."
@@ -98,6 +125,12 @@ def execute_shell_command(command: str) -> str:
         if process.returncode != 0:
             return f"(Command exited with code {process.returncode})\n{captured or '(no output)'}"
         return captured or "(command completed successfully)"
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        timer.cancel()
         return f"Error executing command: {e}"
+    finally:
+        timer.cancel()
+        cancel_stop.set()
+        if cancel_thread is not None and cancel_thread.is_alive():
+            cancel_thread.join(timeout=0.5)

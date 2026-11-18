@@ -33,6 +33,8 @@ A cross-platform, multi-provider autonomous AI engineering assistant for your te
 * **MCP Plugin Support (Optional):**
   * Connects to external **Model Context Protocol (MCP v2)** servers over `stdio` or `Streamable HTTP` via `~/.termind/mcp.json` or project-local `.mcp.json`.
   * Dynamically registers external tools (`mcp__<server>__<tool>`) across Gemini, OpenAI, DeepSeek, and Anthropic engines with `[y/N]` execution confirmations.
+* **Headless JSON-RPC 2.0 Interface (`--rpc`):** 
+  * Enables running Termind as an autonomous backend process over stdin/stdout for desktop GUIs (such as [Termind Desktop](https://github.com/Arta48/termind-desktop)), editor plugins (VS Code / Neovim), and automated pipelines with bi-directional human-in-the-loop approvals.
 
 ---
 
@@ -162,6 +164,15 @@ Navigate to any project directory you want Termind to work in (this directory be
   ```bash
   PYTHONPATH=/path/to/termind python -P -m termind
   ```
+  
+### Headless / GUI Mode (JSON-RPC 2.0)
+
+You can launch Termind as a headless JSON-RPC 2.0 server over stdio for external GUI frontends or IDE integrations:
+
+```bash
+termind --rpc /path/to/workspace
+```
+All agent events (thoughts, text streaming, shell output, tool calls) are emitted as standard JSON-RPC notifications, and mutating actions request permission via standard bi-directional JSON-RPC requests.
 
 ### Interactive Commands
 

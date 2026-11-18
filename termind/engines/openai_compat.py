@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import state
+from ..rpc import rpc_check_cancelled
 from .streaming import (
     StepResult,
     StreamRenderer,
@@ -122,6 +123,7 @@ def stream_openai_step(
     think_parser = ThinkTagStreamParser()
 
     for chunk in stream:
+        rpc_check_cancelled()
         if getattr(chunk, "usage", None):
             u = chunk.usage
             usage_stats = (u.prompt_tokens or 0, u.completion_tokens or 0, u.total_tokens or 0)

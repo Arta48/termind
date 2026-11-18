@@ -38,7 +38,8 @@ def view_image(file_path: str, query: str = "Describe what is depicted in this i
     if file_size > MAX_IMAGE_BYTES:
         return f"Error: image '{file_path}' exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)} MB size limit."
 
-    print(f"\n\033[94m[Visual Inspection: {file_path}]\033[0m")
+    if not state.rpc_mode:
+        print(f"\n\033[94m[Visual Inspection: {file_path}]\033[0m")
 
     mime_type = mimetypes.guess_type(abs_path)[0] or "image/png"
     with open(abs_path, "rb") as f:

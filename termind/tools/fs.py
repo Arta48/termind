@@ -149,7 +149,10 @@ def edit_file_replace(file_path: str, target_snippet: str, replacement_snippet: 
                 "Provide more surrounding context lines to uniquely identify the target block."
             )
 
-        diff = f"\033[91m--- Remove:\n{target}\033[0m\n\033[92m+++ Add:\n{replacement}\033[0m"
+        if state.rpc_mode:
+            diff = f"--- Remove:\n{target}\n+++ Add:\n{replacement}"
+        else:
+            diff = f"\033[91m--- Remove:\n{target}\033[0m\n\033[92m+++ Add:\n{replacement}\033[0m"
         if not ask_user_permission(f"Edit file: {file_path}", diff):
             return "Cancelled by user: edit rejected."
 

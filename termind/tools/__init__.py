@@ -3,6 +3,7 @@
 from typing import Any, Dict, List
 
 from ..mcp_client import mcp_manager
+from ..rpc import rpc_emit
 from .fs import (
     delete_file,
     edit_file_replace,
@@ -172,18 +173,29 @@ TOOLS_SCHEMAS: List[Dict[str, Any]] = [
 
 
 def execute_tool_call(fn_name: str, fn_args: Any) -> str:
-    """Safely invokes a built-in or connected MCP tool with validated arguments."""
+    """Safely invokes a built-in or connected MCP tool with RPC progress events."""
     if not isinstance(fn_args, dict):
         return f"Error: tool arguments for '{fn_name}' must be a JSON object."
-    if mcp_manager.has_tool(fn_name):
-        return mcp_manager.call_tool(fn_name, fn_args)
-    tool_fn = TOOLS_MAP.get(fn_name)
-    if not tool_fn:
-        return f"Error: unknown tool '{fn_name}'"
+
+    rpc_emit({"type": "tool_start", "name": fn_name, "args": fn_args})
     try:
-        return str(tool_fn(**fn_args))
+        if mcp_manager.has_tool(fn_name):
+            res = mcp_manager.call_tool(fn_name, fn_args)
+        else:
+            tool_fn = TOOLS_MAP.get(fn_name)
+            if not tool_fn:
+                res = f"Error: unknown tool '{fn_name}'"
+            else:
+                res = str(tool_fn(**fn_args))
+        rpc_emit({"type": "tool_end", "name": fn_name, "success": True})
+        return res
+    except KeyboardInterrupt:
+        rpc_emit({"type": "tool_end", "name": fn_name, "success": False, "error": "Cancelled"})
+        raise
     except Exception as e:
-        return f"Tool execution error: {e}"
+        err_msg = f"Tool execution error: {e}"
+        rpc_emit({"type": "tool_end", "name": fn_name, "success": False, "error": err_msg})
+        return err_msg
 
 
 __all__ = [

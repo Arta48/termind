@@ -15,6 +15,7 @@ from .config import (
     MCP_GLOBAL_CONFIG,
     state,
 )
+from .rpc import rpc_emit
 from .security import ask_user_permission
 
 
@@ -201,18 +202,27 @@ class MCPManager:
 
         for name in global_names:
             ok, msg = self.connect(name)
-            color = "92" if ok else "93"
-            print(f"\033[{color}m[MCP] {msg}\033[0m")
+            if state.rpc_mode:
+                rpc_emit({"type": "notice", "text": f"[MCP] {msg}"})
+            else:
+                color = "92" if ok else "93"
+                print(f"\033[{color}m[MCP] {msg}\033[0m")
 
         if local_names:
-            print(f"\n\033[93m[⚠️ WORKSPACE MCP CONFIG DETECTED]: {', '.join(local_names)}\033[0m")
+            if state.rpc_mode:
+                rpc_emit({"type": "notice", "text": f"Workspace MCP config detected: {', '.join(local_names)}"})
+            else:
+                print(f"\n\033[93m[⚠️ WORKSPACE MCP CONFIG DETECTED]: {', '.join(local_names)}\033[0m")
             for name in local_names:
                 cfg, _ = self._configs[name]
                 preview = cfg.get("url") or f"{cfg.get('command')} {' '.join(cfg.get('args') or [])}"
                 if ask_user_permission(f"Start workspace MCP server '{name}'", str(preview)):
                     ok, msg = self.connect(name)
-                    color = "92" if ok else "93"
-                    print(f"\033[{color}m[MCP] {msg}\033[0m")
+                    if state.rpc_mode:
+                        rpc_emit({"type": "notice", "text": f"[MCP] {msg}"})
+                    else:
+                        color = "92" if ok else "93"
+                        print(f"\033[{color}m[MCP] {msg}\033[0m")
 
     def has_tool(self, exposed_name: str) -> bool:
         return exposed_name in self._tools
@@ -231,7 +241,8 @@ class MCPManager:
             return await session.call_tool(orig_name, arguments=fn_args)
 
         try:
-            print(f"\n\033[94m[MCP Call: {server_name}.{orig_name}]\033[0m")
+            if not state.rpc_mode:
+                print(f"\n\033[94m[MCP Call: {server_name}.{orig_name}]\033[0m")
             res = self._run_coro(_invoke(), timeout=MCP_CALL_TIMEOUT_SEC)
             parts: List[str] = []
             for item in res.content or []:

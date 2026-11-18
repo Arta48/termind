@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import state
+from ..rpc import rpc_check_cancelled
 from .streaming import StepResult, StreamRenderer, is_bad_request_error
 
 
@@ -192,6 +193,7 @@ def stream_anthropic_step(
 
     with _open_anthropic_stream() as stream:
         for event in stream:
+            rpc_check_cancelled()
             if getattr(event, "type", "") == "content_block_delta":
                 delta_obj = event.delta
                 d_type = getattr(delta_obj, "type", "")

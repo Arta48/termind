@@ -27,6 +27,13 @@ from .config import (
 from .engines import run_agent_turn
 from .engines.streaming import HAS_RICH
 from .mcp_client import mcp_manager
+from .rpc import (
+    clear_rpc_cancel,
+    configure_rpc_stdio,
+    get_rpc_command,
+    rpc_emit,
+    start_rpc_stdin_reader,
+)
 from .security import check_safe_path, is_binary_file
 from .session import refresh_active_session, reset_conversation
 
@@ -67,11 +74,19 @@ def setup_readline_history() -> None:
 
 def init_workspace_from_args() -> None:
     """Resolves the target workspace directory from CLI arguments and enters it."""
-    if len(sys.argv) > 1:
-        if not os.path.isdir(sys.argv[1]):
-            print(f"\033[91m[Error: '{sys.argv[1]}' is not a valid directory]\033[0m")
+    state.rpc_mode = "--rpc" in sys.argv[1:]
+    path_args = [a for a in sys.argv[1:] if a != "--rpc"]
+    if path_args:
+        if not os.path.isdir(path_args[0]):
+            err_msg = f"'{path_args[0]}' is not a valid directory."
+            if state.rpc_mode:
+                if hasattr(sys.stdout, "reconfigure"):
+                    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+                rpc_emit({"type": "error", "message": err_msg})
+            else:
+                print(f"\033[91m[Error: {err_msg}]\033[0m")
             sys.exit(1)
-        state.workspace_dir = os.path.realpath(sys.argv[1])
+        state.workspace_dir = os.path.realpath(path_args[0])
         os.chdir(state.workspace_dir)
     else:
         state.workspace_dir = os.path.realpath(os.getcwd())
@@ -147,57 +162,54 @@ def print_banner(show_header: bool = True) -> None:
     print("=" * 65)
 
 
-def handle_file_attachment(user_input: str) -> Optional[Any]:
-    """Reads and validates an attached text or image file for /file commands."""
-    file_path, prompt_text = parse_file_command(user_input)
+def prepare_file_attachment(
+    file_path: str,
+    prompt_text: str,
+    announce: bool = False,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Validates and encodes a workspace text or image attachment without printing to stdout."""
     is_safe, resolved = check_safe_path(file_path)
     if not is_safe:
-        print(resolved)
-        return None
+        return None, resolved
     if not file_path or not os.path.exists(resolved):
-        print(f"Error: file '{file_path}' not found.")
-        return None
+        return None, f"Error: file '{file_path}' not found."
     if os.path.isdir(resolved):
-        print(f"Error: '{file_path}' is a directory, not a file.")
-        return None
+        return None, f"Error: '{file_path}' is a directory, not a file."
 
     ext = os.path.splitext(resolved)[1].lower()
     if ext in IMAGE_EXTENSIONS:
         try:
             file_size = os.path.getsize(resolved)
         except OSError as e:
-            print(f"Error inspecting '{file_path}': {e}")
-            return None
+            return None, f"Error inspecting '{file_path}': {e}"
         if file_size > MAX_IMAGE_BYTES:
-            print(f"Error: image '{file_path}' exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)} MB limit.")
-            return None
+            return None, f"Error: image '{file_path}' exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)} MB limit."
 
         mime_type = mimetypes.guess_type(resolved)[0] or "image/png"
         with open(resolved, "rb") as f:
             img_bytes = f.read()
 
-        print(f"[Attached image: {file_path}]")
+        if announce:
+            print(f"[Attached image: {file_path}]")
         if state.provider == "gemini":
             from google.genai import types
 
-            return [types.Part.from_bytes(data=img_bytes, mime_type=mime_type), prompt_text]
+            return [types.Part.from_bytes(data=img_bytes, mime_type=mime_type), prompt_text], None
 
         b64_img = base64.b64encode(img_bytes).decode("utf-8")
         return [
             {"type": "text", "text": prompt_text},
             {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_img}"}},
-        ]
+        ], None
 
     if is_binary_file(resolved):
-        print(f"Error: '{file_path}' is a binary file and cannot be attached as text.")
-        return None
+        return None, f"Error: '{file_path}' is a binary file and cannot be attached as text."
 
     try:
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
             file_body = f.read(MAX_ATTACH_TEXT_CHARS + 1)
     except Exception as e:
-        print(f"Error reading file '{file_path}': {e}")
-        return None
+        return None, f"Error reading file '{file_path}': {e}"
 
     truncated_note = ""
     if len(file_body) > MAX_ATTACH_TEXT_CHARS:
@@ -205,8 +217,20 @@ def handle_file_attachment(user_input: str) -> Optional[Any]:
         truncated_note = f"\n... [truncated to {MAX_ATTACH_TEXT_CHARS} characters]"
 
     fence = get_safe_markdown_fence(file_body)
-    print(f"[Attached text file: {file_path} ({len(file_body)} chars)]")
-    return f"{prompt_text}\n\n[Attached File: {file_path}]\n{fence}\n{file_body}{truncated_note}\n{fence}"
+    if announce:
+        print(f"[Attached text file: {file_path} ({len(file_body)} chars)]")
+    payload = f"{prompt_text}\n\n[Attached File: {file_path}]\n{fence}\n{file_body}{truncated_note}\n{fence}"
+    return payload, None
+
+
+def handle_file_attachment(user_input: str) -> Optional[Any]:
+    """Reads and validates an attached text or image file for CLI /file commands."""
+    file_path, prompt_text = parse_file_command(user_input)
+    payload, err = prepare_file_attachment(file_path, prompt_text, announce=not state.rpc_mode)
+    if err:
+        print(err)
+        return None
+    return payload
 
 
 def read_multiline_input(initial_text: str) -> Optional[str]:
@@ -234,9 +258,202 @@ def read_multiline_input(initial_text: str) -> Optional[str]:
     return "\n".join(lines).strip()
 
 
+def emit_rpc_state() -> None:
+    """Emits the current agent/provider/MCP state snapshot over NDJSON."""
+    rpc_emit({
+        "type": "state",
+        "workspace": state.workspace_dir,
+        "os": OS_NAME,
+        "provider": state.provider,
+        "model": state.model,
+        "thinking": state.thinking_level,
+        "yolo": state.yolo_mode,
+        "base_url": get_provider_base_url(state.provider) or "",
+        "api_key_masked": mask_secret(get_provider_api_key(state.provider)),
+        "mcp": mcp_manager.status_report(),
+    })
+
+
+def handle_mcp_rpc_command(sub_cmd: str, sub_arg: str) -> str:
+    """Executes MCP management commands in RPC mode without printing to stdout."""
+    if sub_cmd == "status":
+        return mcp_manager.status_report()
+    elif sub_cmd == "reload":
+        mcp_manager.disconnect_all()
+        mcp_manager.connect_on_startup()
+        refresh_active_session()
+        return "MCP servers reloaded."
+    elif sub_cmd == "connect":
+        if not sub_arg:
+            return "Usage: /mcp connect <server_name|all>"
+        if sub_arg.lower() == "all":
+            mcp_manager.discover_configs()
+            msgs = []
+            for srv in list(mcp_manager._configs.keys()):
+                _, msg = mcp_manager.connect(srv)
+                msgs.append(msg)
+            refresh_active_session()
+            return "\n".join(msgs)
+        else:
+            mcp_manager.discover_configs()
+            _, msg = mcp_manager.connect(sub_arg)
+            refresh_active_session()
+            return msg
+    elif sub_cmd == "disconnect":
+        if not sub_arg:
+            return "Usage: /mcp disconnect <server_name|all>"
+        if sub_arg.lower() == "all":
+            msgs = []
+            for srv in list(mcp_manager._sessions.keys()):
+                msgs.append(mcp_manager.disconnect(srv))
+            refresh_active_session()
+            return "\n".join(msgs)
+        else:
+            msg = mcp_manager.disconnect(sub_arg)
+            refresh_active_session()
+            return msg
+    return "Unknown MCP subcommand. Use: status, connect, disconnect, reload."
+
+
+def run_rpc_loop() -> None:
+    """Runs headless NDJSON server mode for GUI frontends like termind-desktop."""
+    configure_rpc_stdio()
+
+    load_user_config()
+    atexit.register(mcp_manager.shutdown)
+    reset_conversation(announce_rules=False)
+
+    # Start stdin reader BEFORE MCP startup so workspace .mcp.json permission prompts never deadlock
+    start_rpc_stdin_reader()
+
+    rpc_emit({
+        "type": "ready",
+        "workspace": state.workspace_dir,
+        "os": OS_NAME,
+        "provider": state.provider,
+        "model": state.model,
+        "thinking": state.thinking_level,
+        "yolo": state.yolo_mode,
+        "base_url": get_provider_base_url(state.provider) or "",
+        "api_key_masked": mask_secret(get_provider_api_key(state.provider)),
+        "mcp": mcp_manager.status_report(),
+    })
+
+    mcp_manager.connect_on_startup()
+    if mcp_manager._configs:
+        refresh_active_session()
+        emit_rpc_state()
+
+    while True:
+        msg = get_rpc_command()
+        cmd = msg.get("cmd")
+
+        if cmd == "quit":
+            break
+        elif cmd == "reset":
+            reset_conversation()
+            emit_rpc_state()
+        elif cmd == "compact":
+            clear_rpc_cancel()
+            rpc_emit({"type": "notice", "text": "Compacting conversation context..."})
+            try:
+                summary_text = run_agent_turn(
+                    "Generate a concise, structured bulleted summary of our conversation so far: "
+                    "current goal, modified files, findings, and pending tasks.",
+                    allow_tools=False,
+                )
+                if summary_text.strip():
+                    reset_conversation(seed_context=summary_text.strip())
+                    rpc_emit({"type": "notice", "text": "Context successfully compacted with preserved summary."})
+                    emit_rpc_state()
+                else:
+                    rpc_emit({"type": "notice", "text": "Compacting aborted: empty summary returned."})
+            except Exception as e:
+                rpc_emit({"type": "error", "message": str(e)})
+            rpc_emit({"type": "turn_done"})
+        elif cmd == "set_yolo":
+            state.yolo_mode = bool(msg.get("enabled", False))
+            emit_rpc_state()
+        elif cmd == "set_provider":
+            p_name = str(msg.get("provider", "")).lower()
+            if p_name in PROVIDERS:
+                state.provider = p_name
+                state.model = (
+                    state.saved_providers.get(p_name, {}).get("model")
+                    or PROVIDERS[p_name]["default_model"]
+                )
+                reset_conversation()
+                save_user_config()
+            emit_rpc_state()
+        elif cmd == "set_model":
+            m_name = str(msg.get("model", "")).strip()
+            if m_name:
+                state.model = m_name
+                refresh_active_session()
+                save_user_config()
+            emit_rpc_state()
+        elif cmd == "set_thinking":
+            lvl = str(msg.get("level", "")).lower()
+            if lvl in ("off", "low", "medium", "high"):
+                state.thinking_level = lvl
+                refresh_active_session()
+                save_user_config()
+            emit_rpc_state()
+        elif cmd == "set_base_url":
+            url = str(msg.get("url", "")).strip()
+            state.provider_overrides.setdefault(state.provider, {})
+            if url and url.lower() != "reset":
+                state.provider_overrides[state.provider]["base_url"] = url
+            else:
+                state.provider_overrides[state.provider].pop("base_url", None)
+                state.saved_providers.get(state.provider, {}).pop("base_url", None)
+            refresh_active_session()
+            save_user_config()
+            emit_rpc_state()
+        elif cmd == "set_key":
+            key = str(msg.get("api_key", "")).strip()
+            state.provider_overrides.setdefault(state.provider, {})
+            if key and key.lower() != "reset":
+                state.provider_overrides[state.provider]["api_key"] = key
+            else:
+                state.provider_overrides[state.provider].pop("api_key", None)
+                state.saved_providers.get(state.provider, {}).pop("api_key", None)
+            refresh_active_session()
+            save_user_config()
+            emit_rpc_state()
+        elif cmd == "mcp_command":
+            sub_cmd = str(msg.get("sub_cmd", "status")).lower()
+            sub_arg = str(msg.get("sub_arg", "")).strip()
+            output = handle_mcp_rpc_command(sub_cmd, sub_arg)
+            rpc_emit({"type": "mcp_response", "output": output})
+            emit_rpc_state()
+        elif cmd == "prompt":
+            clear_rpc_cancel()
+            text = str(msg.get("text", "")).strip()
+            attach_path = str(msg.get("attachment") or "").strip()
+            payload: Any = text
+            abort_turn = False
+            if attach_path:
+                loaded, err_msg = prepare_file_attachment(attach_path, text or "Analyze this file.", announce=False)
+                if err_msg:
+                    rpc_emit({"type": "error", "message": err_msg})
+                    abort_turn = True
+                else:
+                    payload = loaded
+            try:
+                if not abort_turn and payload:
+                    run_agent_turn(payload)
+            except Exception as e:
+                rpc_emit({"type": "error", "message": str(e)})
+            rpc_emit({"type": "turn_done"})
+
+
 def main() -> None:
     """Initializes workspace, history, user config, MCP plugins, and runs the interactive REPL."""
     init_workspace_from_args()
+    if state.rpc_mode:
+        run_rpc_loop()
+        return
     setup_readline_history()
     load_user_config()
     atexit.register(mcp_manager.shutdown)

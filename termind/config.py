@@ -108,6 +108,7 @@ class AgentState:
     """Encapsulates workspace path, active provider, credentials, flags, and conversation history."""
 
     workspace_dir: str = field(default_factory=lambda: os.path.realpath(os.getcwd()))
+    rpc_mode: bool = False
     provider: str = "gemini"
     model: str = PROVIDERS["gemini"]["default_model"]
     thinking_level: str = "high"

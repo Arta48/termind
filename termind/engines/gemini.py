@@ -1,11 +1,16 @@
 """Google Gemini native engine with ThinkingConfig, thought streaming, and signature preservation."""
 
 import copy
-import time
 from typing import Any, Dict, List, Optional
 
 from ..config import MAX_TOOL_STEPS, get_gemini_client, state
 from ..mcp_client import mcp_manager
+from ..rpc import (
+    emit_turn_error,
+    emit_turn_notice,
+    rpc_check_cancelled,
+    rpc_interruptible_sleep,
+)
 from ..session import build_system_prompt
 from ..tools import NATIVE_TOOLS_LIST, execute_tool_call
 from .streaming import (
@@ -115,7 +120,7 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
     try:
         client = get_gemini_client()
     except Exception as e:
-        print(f"\n\033[91m[Error initializing Gemini client: {e}]\033[0m")
+        emit_turn_error(f"Error initializing Gemini client: {e}")
         return ""
 
     turn_start_idx = len(state.gemini_history)
@@ -127,6 +132,7 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
 
     try:
         for _step in range(MAX_TOOL_STEPS):
+            rpc_check_cancelled()
             thinking_cfg = build_gemini_thinking_config(types, state.model, state.thinking_level)
             mcp_decls = mcp_manager.get_gemini_declarations(types)
             gemini_tools: List[Any]
@@ -160,6 +166,7 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
             step_succeeded = False
 
             for attempt in range(max_retries):
+                rpc_check_cancelled()
                 renderer = StreamRenderer()
                 collected_parts = []
                 last_usage = None
@@ -173,6 +180,7 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
                     )
 
                     for chunk in response_stream:
+                        rpc_check_cancelled()
                         if getattr(chunk, "usage_metadata", None):
                             last_usage = chunk.usage_metadata
                         if not chunk.candidates or not chunk.candidates[0].content:
@@ -206,10 +214,10 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
                         continue
                     if is_retryable_error(e) and attempt < max_retries - 1:
                         sleep_s = min(60, base_delay * (2 ** attempt))
-                        print(f"\n\033[93m[Server busy. Retrying in {sleep_s}s... Attempt {attempt + 1}/{max_retries}]\033[0m")
-                        time.sleep(sleep_s)
+                        emit_turn_notice(f"Server busy. Retrying in {sleep_s}s... Attempt {attempt + 1}/{max_retries}")
+                        rpc_interruptible_sleep(sleep_s)
                         continue
-                    print(f"\n\033[91m[Execution Error]: {e}\033[0m")
+                    emit_turn_error(f"Execution Error: {e}")
                     del state.gemini_history[turn_start_idx:]
                     return ""
 
@@ -240,8 +248,10 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
 
             response_parts: List[Any] = []
             for fc in function_calls:
+                rpc_check_cancelled()
                 fn_args = dict(fc.args) if getattr(fc, "args", None) else {}
                 tool_result = execute_tool_call(fc.name, fn_args)
+                rpc_check_cancelled()
                 fr_part = types.Part.from_function_response(
                     name=fc.name,
                     response={"result": tool_result or "(no output)"},
@@ -252,10 +262,10 @@ def run_gemini_turn(user_content: Any, allow_tools: bool = True) -> str:
 
             state.gemini_history.append(types.Content(role="user", parts=response_parts))
         else:
-            print(f"\n\033[93m[Stopped after reaching {MAX_TOOL_STEPS} tool steps]\033[0m")
+            emit_turn_notice(f"Stopped after reaching {MAX_TOOL_STEPS} tool steps")
 
     except KeyboardInterrupt:
-        print("\n\033[93m[Generation interrupted by user]\033[0m")
+        emit_turn_notice("Generation interrupted by user")
         del state.gemini_history[turn_start_idx:]
         return ""
 

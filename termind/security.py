@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 
 from .config import BINARY_EXTENSIONS, IMAGE_EXTENSIONS, state
+from .rpc import rpc_emit, rpc_request_permission
 
 
 def check_safe_path(file_path: str) -> Tuple[bool, str]:
@@ -35,10 +36,16 @@ def is_within_workspace(abs_path: str) -> bool:
 
 
 def ask_user_permission(action: str, details: str = "") -> bool:
-    """Prompts the user in the terminal to authorize mutating or shell operations."""
+    """Prompts via terminal [y/N] in CLI mode or structured JSON request in --rpc mode."""
     if state.yolo_mode:
-        print(f"\n\033[93m[⚡ YOLO]: Auto-approved: {action}\033[0m")
+        if state.rpc_mode:
+            rpc_emit({"type": "notice", "text": f"YOLO auto-approved: {action}"})
+        else:
+            print(f"\n\033[93m[⚡ YOLO]: Auto-approved: {action}\033[0m")
         return True
+
+    if state.rpc_mode:
+        return rpc_request_permission(action, details)
 
     print("\n\033[93m[⚠️ PERMISSION REQUIRED]\033[0m")
     print(f"Action: \033[1m{action}\033[0m")

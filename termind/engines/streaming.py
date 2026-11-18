@@ -3,6 +3,9 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..config import state
+from ..rpc import rpc_emit
+
 try:
     from rich.console import Console
     from rich.live import Live
@@ -84,6 +87,9 @@ class StreamRenderer:
     def emit_thought(self, text: str) -> None:
         if not text:
             return
+        if state.rpc_mode:
+            rpc_emit({"type": "thought_delta", "text": text})
+            return
         self.stop_live()
         if not self.in_thought:
             print("\n\033[90m[Agent Reasoning]:\033[0m")
@@ -92,6 +98,10 @@ class StreamRenderer:
 
     def emit_text(self, text: str) -> None:
         if not text:
+            return
+        if state.rpc_mode:
+            self.full_text += text
+            rpc_emit({"type": "text_delta", "text": text})
             return
         if self.in_thought:
             print()
@@ -117,6 +127,10 @@ class StreamRenderer:
                 self.live = None
 
     def finish_step(self) -> None:
+        if state.rpc_mode:
+            if self.full_text:
+                rpc_emit({"type": "step_done"})
+            return
         if self.in_thought:
             print()
             self.in_thought = False
@@ -127,6 +141,9 @@ class StreamRenderer:
 
 def print_token_usage(prompt_tokens: int, output_tokens: int, total_tokens: int) -> None:
     """Prints token counts in dimmed style."""
+    if state.rpc_mode:
+        rpc_emit({"type": "usage", "prompt": prompt_tokens, "output": output_tokens, "total": total_tokens})
+        return
     meta_str = f"Tokens: prompt: {prompt_tokens} | output: {output_tokens} | total: {total_tokens}"
     if HAS_RICH and console is not None:
         console.print(f"[dim]{meta_str}[/dim]")

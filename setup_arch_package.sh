@@ -71,7 +71,7 @@ Exec=termind %U
 Icon=utilities-terminal
 Terminal=true
 Categories=Development;Utility;ConsoleOnly;
-StartupWMClass=termind
+StartupWMClass=${pkgname}
 Keywords=ai;agent;terminal;cli;developer;assistant;gemini;claude;openai;deepseek;ollama;
 MimeType=inode/directory;
 _DESKTOP_EOF
@@ -85,7 +85,7 @@ Actions=OpenInTermind
 ServiceTypes=KonqPopupMenu/Plugin
 MimeType=inode/directory;
 Terminal=true
-StartupWMClass=termind
+StartupWMClass=${pkgname}
 
 [Desktop Action OpenInTermind]
 Name=Open with Termind
