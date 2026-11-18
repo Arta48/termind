@@ -59,24 +59,39 @@ A cross-platform, multi-provider autonomous AI engineering assistant for your te
    cd termind
    ```
 
-2. **Create and activate a virtual environment (recommended):**
+2. **Choose an installation method:**
 
-   **Linux / macOS:**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
+   ### Option A: Global System Install (Recommended)
+   Allows running `termind` from any project directory.
 
-   **Windows (PowerShell):**
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   ```
+   * **Arch Linux (and derivatives):**
+     ```bash
+     chmod +x setup_arch_package.sh
+     ./setup_arch_package.sh
+     ```
+     *(Installs via `makepkg` & `pacman` into `/opt/termind` and `/usr/bin/termind`. To uninstall: `sudo pacman -R termind`.)*
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+   * **Windows (PowerShell, no admin rights required):**
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
+     ```
+     *(Installs into `%LOCALAPPDATA%\Programs\Termind` with an isolated `.venv` and adds `termind` to User `PATH`. Restart your terminal after setup. To uninstall: `powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Uninstall`.)*
+
+   ### Option B: Manual Virtual Environment
+
+   * **Linux / macOS:**
+     ```bash
+     python3 -m venv .venv
+     source .venv/bin/activate
+     pip install -r requirements.txt
+     ```
+
+   * **Windows (PowerShell):**
+     ```powershell
+     python -m venv .venv
+     .\.venv\Scripts\Activate.ps1
+     pip install -r requirements.txt
+     ```
 
 ---
 
@@ -107,11 +122,17 @@ $env:DEEPSEEK_API_KEY="your_deepseek_key"
 
 ## Usage
 
-Run Termind from inside the project directory you want it to work in (this directory becomes the sandbox root):
+Navigate to any project directory you want Termind to work in (this directory becomes the sandbox root):
 
-```bash
-python termind.py
-```
+* **If installed globally:**
+  ```bash
+  termind
+  ```
+
+* **If running manually from the repository:**
+  ```bash
+  python /path/to/termind.py
+  ```
 
 ### Interactive Commands
 

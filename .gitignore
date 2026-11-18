@@ -42,3 +42,7 @@ dist/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Arch packaging temporary files
+*_pkg/
+*.pkg.tar.*
