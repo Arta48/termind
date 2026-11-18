@@ -25,7 +25,8 @@ A cross-platform, multi-provider autonomous AI engineering assistant for your te
   * **Human-in-the-Loop (HITL):** Prompts `[y/N]` before file modifications or shell execution (can be toggled with `/yolo`).
 * **Terminal Experience:**
   * Real-time Markdown rendering and syntax highlighting via `rich`.
-  * Persistent command history (`~/.universal_agent_history`) via `readline` / `pyreadline3`.
+  * Persistent command history (`~/.termind/history`) via `readline` / `pyreadline3`.
+  * Persistent user settings auto-saved to `~/.termind/config.json` (remembers your provider, model, thinking level, custom base URLs, and API keys across launches).
   * Multiline paste mode (`"""`) and smart `/file` path parsing (supports quotes, spaces, and drag-and-drop escapes).
   * Automatic project rules loading from `.agentrules`, `.cursorrules`, or `PROJECT.md`.
   * Per-turn token usage reporting, graceful `Ctrl+C` turn interruption with history rollback, and exponential backoff retries on `429` / `503` / `529` errors.
@@ -119,7 +120,32 @@ $env:GROQ_API_KEY="your_groq_key"
 $env:OPENROUTER_API_KEY="your_openrouter_key"
 ```
 
-*(Alternatively, you can configure API keys and custom endpoints dynamically at runtime using `/key` and `/base_url`.)*
+### Persistent Configuration File (`~/.termind/config.json`)
+
+Changes made via `/provider`, `/model`, `/thinking`, `/key`, and `/base_url` are **automatically saved** to `~/.termind/config.json` (useful when launching from desktop menus or explorer context menus). Settings priority:
+
+1. Runtime commands (`/key`, `/base_url`, etc.)
+2. Environment variables (`GEMINI_API_KEY`, `OPENAI_API_KEY`, etc.)
+3. `~/.termind/config.json`
+
+Example `~/.termind/config.json`:
+```json
+{
+  "provider": "gemini",
+  "model": "gemini-3.8-flash",
+  "thinking_level": "high",
+  "providers": {
+    "gemini": {
+      "api_key": "your_gemini_key"
+    },
+    "openrouter": {
+      "api_key": "your_openrouter_key",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "anthropic/claude-sonnet-4.6"
+    }
+  }
+}
+```
 
 ---
 
@@ -141,6 +167,7 @@ Navigate to any project directory you want Termind to work in (this directory be
 
 | Command | Description |
 | :--- | :--- |
+| `/config` | Display active provider, model, thinking level, base URL, and masked API key. |
 | `/provider <name>` | Switch active provider (`gemini`, `openai`, `deepseek`, `claude`, `groq`, `ollama`, `openrouter`). |
 | `/model <name>` | Switch model while preserving conversation memory and compacted summary. |
 | `/thinking <level>` | Set reasoning depth: `off`, `low`, `medium`, `high` (preserves conversation memory). |
@@ -200,5 +227,5 @@ Configure servers in your global config **`~/.termind/mcp.json`** (auto-connecte
 * **Workspace Isolation:** File and search tools cannot access paths outside the directory from which `termind.py` was started, including via `../` traversal or symbolic links.
 * **Active-Provider Privacy:** `view_image` always uses your currently selected provider and never falls back to external cloud vision APIs behind your back.
 * **Shell Execution & YOLO Mode Caution:** Enabling `/yolo` allows the agent to run shell commands and modify or delete files inside the workspace without asking `[y/N]`. Note that shell commands inherit the process environment and are not OS-containerized—use `/yolo` only in trusted workspaces backed by version control.
-* **Protect Your Keys:** Never commit API keys or `.env` files to public repositories.
+* **Protect Your Keys:** Never commit API keys or `.env` files to public repositories. Keys set with `/key` are stored strictly in `~/.termind/config.json` (outside project directories), never inside workspace folders.
 * **Workspace MCP Verification:** Project-local `.mcp.json` servers are never started silently—Termind always asks for explicit authorization before launching them, and individual MCP tool calls require `[y/N]` confirmation unless `/yolo` is enabled.

@@ -65,17 +65,20 @@ def setup_readline_history() -> None:
     """Loads persistent terminal command history and registers save-on-exit hook."""
     if not readline:
         return
-    history_file = os.path.expanduser("~/.universal_agent_history")
-    if os.path.exists(history_file):
+
+    legacy_history = os.path.expanduser("~/.universal_agent_history")
+    read_target = HISTORY_FILE if os.path.exists(HISTORY_FILE) else legacy_history
+    if os.path.exists(read_target):
         try:
-            readline.read_history_file(history_file)
+            readline.read_history_file(read_target)
         except Exception:
             pass
 
     def _save_history() -> None:
         try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
             readline.set_history_length(2000)
-            readline.write_history_file(history_file)
+            readline.write_history_file(HISTORY_FILE)
         except Exception:
             pass
 
@@ -106,6 +109,11 @@ if len(sys.argv) > 1:
     os.chdir(WORKSPACE_DIR)  # Physical process switch to target directory
 else:
     WORKSPACE_DIR = os.path.realpath(os.getcwd())
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".termind")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+MCP_GLOBAL_CONFIG = os.path.join(CONFIG_DIR, "mcp.json")
+HISTORY_FILE = os.path.join(CONFIG_DIR, "history")
 
 MAX_TOOL_STEPS = 40
 MAX_READ_LINES = 1000
@@ -197,6 +205,7 @@ class AgentState:
     yolo_mode: bool = False
     session_summary: Optional[str] = None
     provider_overrides: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    saved_providers: Dict[str, Dict[str, str]] = field(default_factory=dict)
     gemini_client: Optional[Any] = None
     gemini_client_key: Optional[str] = None
     gemini_history: List[Any] = field(default_factory=list)
@@ -206,20 +215,102 @@ class AgentState:
 state = AgentState()
 
 
+def load_user_config() -> None:
+    """Loads persistent defaults and per-provider credentials from ~/.termind/config.json."""
+    if not os.path.isfile(CONFIG_FILE):
+        return
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+
+        raw_providers = data.get("providers") or {}
+        if isinstance(raw_providers, dict):
+            for p_name, p_cfg in raw_providers.items():
+                if isinstance(p_cfg, dict):
+                    clean_cfg: Dict[str, str] = {}
+                    for k in ("api_key", "base_url", "model"):
+                        if isinstance(p_cfg.get(k), str) and p_cfg[k].strip():
+                            clean_cfg[k] = p_cfg[k].strip()
+                    if clean_cfg:
+                        state.saved_providers[p_name.lower()] = clean_cfg
+
+        saved_provider = str(data.get("provider", "")).strip().lower()
+        if saved_provider in PROVIDERS:
+            state.provider = saved_provider
+            state.model = (
+                state.saved_providers.get(saved_provider, {}).get("model")
+                or PROVIDERS[saved_provider]["default_model"]
+            )
+
+        if isinstance(data.get("model"), str) and data["model"].strip():
+            state.model = data["model"].strip()
+
+        saved_thinking = str(data.get("thinking_level", "")).strip().lower()
+        if saved_thinking in ("off", "low", "medium", "high"):
+            state.thinking_level = saved_thinking
+    except Exception as e:
+        print(f"\033[93m[Warning: Failed to parse {CONFIG_FILE}: {e}]\033[0m")
+
+
+def save_user_config() -> None:
+    """Auto-saves active provider, model, thinking level, and overrides to ~/.termind/config.json."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+
+        merged_providers: Dict[str, Dict[str, str]] = copy.deepcopy(state.saved_providers)
+        for p_name, overrides in state.provider_overrides.items():
+            if overrides:
+                merged_providers.setdefault(p_name, {}).update(overrides)
+        merged_providers.setdefault(state.provider, {})["model"] = state.model
+
+        # Drop empty provider sections after resets
+        merged_providers = {k: v for k, v in merged_providers.items() if v}
+
+        payload = {
+            "provider": state.provider,
+            "model": state.model,
+            "thinking_level": state.thinking_level,
+            "providers": merged_providers,
+        }
+
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+        state.saved_providers = merged_providers
+    except Exception as e:
+        print(f"\033[93m[Warning: Failed to auto-save {CONFIG_FILE}: {e}]\033[0m")
+
+
+def mask_secret(secret: str) -> str:
+    """Masks API keys for safe display in /config output."""
+    if not secret:
+        return "(not set)"
+    if len(secret) <= 8:
+        return "****"
+    return f"{secret[:4]}...{secret[-4:]}"
+
 def get_provider_api_key(provider_name: str) -> str:
-    """Returns per-provider override key if set, otherwise reads its environment variable."""
+    """Priority: session override -> environment variable -> ~/.termind/config.json."""
     override_key = state.provider_overrides.get(provider_name, {}).get("api_key")
     if override_key:
         return override_key
     env_var = PROVIDERS.get(provider_name, {}).get("api_key_env")
-    return os.environ.get(env_var, "") if env_var else ""
+    if env_var and os.environ.get(env_var):
+        return os.environ[env_var]
+    return state.saved_providers.get(provider_name, {}).get("api_key", "")
 
 
 def get_provider_base_url(provider_name: str) -> Optional[str]:
-    """Returns per-provider override URL if set, otherwise returns default endpoint URL."""
+    """Priority: session override -> ~/.termind/config.json -> provider default."""
     override_url = state.provider_overrides.get(provider_name, {}).get("base_url")
     if override_url:
         return override_url
+    saved_url = state.saved_providers.get(provider_name, {}).get("base_url")
+    if saved_url:
+        return saved_url
     return PROVIDERS.get(provider_name, {}).get("base_url")
 
 
@@ -1076,7 +1167,7 @@ class MCPManager:
         local_names: List[str] = []
 
         candidates = [
-            (os.path.expanduser("~/.termind/mcp.json"), "global", False),
+            (MCP_GLOBAL_CONFIG, "global", False),
             (os.path.join(WORKSPACE_DIR, ".mcp.json"), "workspace", True),
         ]
         for cfg_path, label, is_local in candidates:
@@ -1295,7 +1386,7 @@ class MCPManager:
         if not self.is_available():
             return "MCP Python SDK is not installed. Install with: pip install mcp (requires Python 3.11+)."
         if not self._configs:
-            return "No MCP servers configured. Add servers to ~/.termind/mcp.json or ./.mcp.json."
+            return f"No MCP servers configured. Add servers to {MCP_GLOBAL_CONFIG} or ./.mcp.json."
         lines = ["MCP Servers:"]
         for name, (cfg, label) in self._configs.items():
             connected = name in self._sessions
@@ -2257,6 +2348,7 @@ def print_banner(show_header: bool = True) -> None:
         if not HAS_RICH:
             print("ℹ️  Tip: Install 'rich' (pip install rich) for live Markdown rendering.")
     print("📋 Available Commands:")
+    print("  • /config           — show active configuration and masked API keys")
     print("  • /provider <name>  — switch provider: gemini, deepseek, openai, claude, groq, ollama, openrouter")
     print("  • /model <name>     — switch model (keeps conversation memory)")
     print("  • /thinking <level> — set reasoning level: off, low, medium, high")
@@ -2361,8 +2453,9 @@ def read_multiline_input(initial_text: str) -> Optional[str]:
 
 
 def main() -> None:
-    """Initializes terminal history, project rules, and runs the interactive agent REPL."""
+    """Initializes terminal history, user config, project rules, and runs the interactive REPL."""
     setup_readline_history()
+    load_user_config()
     atexit.register(mcp_manager.shutdown)
     mcp_manager.connect_on_startup()
     reset_conversation(announce_rules=True)
@@ -2413,14 +2506,29 @@ def main() -> None:
                 print("\033[93m[Compacting aborted: empty summary returned]\033[0m")
             continue
 
+        if cmd == "/config":
+            active_key = get_provider_api_key(state.provider)
+            active_url = get_provider_base_url(state.provider) or "(native SDK)"
+            print(f"\nActive Configuration ({CONFIG_FILE}):")
+            print(f"  • Provider: {state.provider}")
+            print(f"  • Model:    {state.model}")
+            print(f"  • Thinking: {state.thinking_level}")
+            print(f"  • Base URL: {active_url}")
+            print(f"  • API Key:  {mask_secret(active_key)}")
+            continue
+
         if cmd == "/provider":
             if arg:
                 p_name = arg.lower()
                 if p_name in PROVIDERS:
                     state.provider = p_name
-                    state.model = PROVIDERS[p_name]["default_model"]
+                    state.model = (
+                        state.saved_providers.get(p_name, {}).get("model")
+                        or PROVIDERS[p_name]["default_model"]
+                    )
                     reset_conversation()
-                    print(f"\n[Switched provider to '{state.provider}' (Default model: {state.model})]")
+                    save_user_config()
+                    print(f"\n[Switched provider to '{state.provider}' (Model: {state.model})]")
                 else:
                     print(f"\n[Unknown provider. Available: {', '.join(PROVIDERS.keys())}]")
             else:
@@ -2431,6 +2539,7 @@ def main() -> None:
             if arg:
                 state.model = arg
                 refresh_active_session()
+                save_user_config()
                 print(f"\n[Model updated to '{state.model}' (conversation memory preserved)]")
             else:
                 print(f"\nCurrent model: {state.model}")
@@ -2442,6 +2551,7 @@ def main() -> None:
                 if lvl in ("off", "low", "medium", "high"):
                     state.thinking_level = lvl
                     refresh_active_session()
+                    save_user_config()
                     print(f"\n[Thinking mode set to: '{lvl}' (conversation memory preserved)]")
                 else:
                     print("\n[Usage: /thinking <off|low|medium|high>]")
@@ -2454,11 +2564,13 @@ def main() -> None:
                 state.provider_overrides.setdefault(state.provider, {})
                 if arg.lower() == "reset":
                     state.provider_overrides[state.provider].pop("api_key", None)
+                    state.saved_providers.get(state.provider, {}).pop("api_key", None)
                     print(f"\n[API Key override cleared for '{state.provider}']")
                 else:
                     state.provider_overrides[state.provider]["api_key"] = arg
-                    print(f"\n[API Key updated for '{state.provider}']")
+                    print(f"\n[API Key updated and saved for '{state.provider}']")
                 refresh_active_session()
+                save_user_config()
             else:
                 print("\n[Usage: /key <api_key> or /key reset]")
             continue
@@ -2468,10 +2580,12 @@ def main() -> None:
                 state.provider_overrides.setdefault(state.provider, {})
                 if arg.lower() == "reset":
                     state.provider_overrides[state.provider].pop("base_url", None)
+                    state.saved_providers.get(state.provider, {}).pop("base_url", None)
                     print(f"\n[Custom Base URL cleared for '{state.provider}']")
                 else:
                     state.provider_overrides[state.provider]["base_url"] = arg
-                    print(f"\n[Custom Base URL for '{state.provider}' set to: {arg}]")
+                    print(f"\n[Custom Base URL for '{state.provider}' saved: {arg}]")
+                save_user_config()
             else:
                 print(f"\nCurrent Base URL for '{state.provider}': {get_provider_base_url(state.provider)}")
             continue
