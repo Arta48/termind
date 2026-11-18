@@ -60,6 +60,26 @@ function Update-UserPath {
 if ($Uninstall) {
     Write-Host "Uninstalling Termind..." -ForegroundColor Yellow
     Update-UserPath -TargetDir $BinDir -Mode Remove
+
+    # Remove Start Menu shortcut
+    $StartMenuShortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "Termind.lnk"
+    if (Test-Path $StartMenuShortcut) {
+        Remove-Item -Force $StartMenuShortcut
+        Write-Host "[+] Removed Start Menu shortcut" -ForegroundColor Yellow
+    }
+
+    # Remove Explorer Context Menu entries
+    $ContextRegistryKeys = @(
+        "HKCU:\Software\Classes\Directory\shell\Termind",
+        "HKCU:\Software\Classes\Directory\Background\shell\Termind"
+    )
+    foreach ($regKey in $ContextRegistryKeys) {
+        if (Test-Path $regKey) {
+            Remove-Item -Recurse -Force $regKey
+            Write-Host "[+] Removed Explorer context menu: $regKey" -ForegroundColor Yellow
+        }
+    }
+
     if (Test-Path $InstallDir) {
         Remove-Item -Recurse -Force $InstallDir
         Write-Host "[+] Removed directory: $InstallDir" -ForegroundColor Green
@@ -181,5 +201,78 @@ $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 # 4. REGISTER IN USER PATH
 # ---------------------------------------------------------------------
 Update-UserPath -TargetDir $BinDir -Mode Add
+
+# =====================================================================
+# RESOLVE TERMINAL ICON (Windows Terminal with fallback to cmd.exe)
+# =====================================================================
+function Get-TerminalIcon {
+    $CachedIcon = Join-Path $InstallDir "termind.ico"
+    $wtApp = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($wtApp -and $wtApp.InstallLocation) {
+        $pngPath = Join-Path $wtApp.InstallLocation "Images\Square44x44Logo.targetsize-256.png"
+        if (Test-Path $pngPath) {
+            try {
+                $pngBytes = [System.IO.File]::ReadAllBytes($pngPath)
+                $len = $pngBytes.Length
+                $icoHeader = [byte[]]@(
+                    0,0, 1,0, 1,0,                    # ICONDIR: Reserved, Type=1, Count=1
+                    0, 0, 0, 0, 1,0, 32,0,           # Entry: Width=0(256), Height=0(256), Colors=0, Planes=1, Bits=32
+                    ($len -band 0xFF), (($len -shr 8) -band 0xFF), (($len -shr 16) -band 0xFF), (($len -shr 24) -band 0xFF), # Size (4 bytes)
+                    22,0,0,0                         # Offset (22 bytes from start)
+                )
+                $fs = New-Object System.IO.FileStream($CachedIcon, [System.IO.FileMode]::Create)
+                $fs.Write($icoHeader, 0, $icoHeader.Length)
+                $fs.Write($pngBytes, 0, $pngBytes.Length)
+                $fs.Close()
+                return $CachedIcon
+            } catch {}
+        }
+    }
+    return "$env:SystemRoot\System32\cmd.exe,0"
+}
+
+$TerminalIcon = Get-TerminalIcon
+
+# ---------------------------------------------------------------------
+# 5. CREATE START MENU SHORTCUT (.lnk)
+# ---------------------------------------------------------------------
+Write-Host "[*] Creating Start Menu shortcut..." -ForegroundColor Cyan
+$StartMenuDir  = [Environment]::GetFolderPath("Programs")
+$ShortcutPath  = Join-Path $StartMenuDir "Termind.lnk"
+
+$WshShell = New-Object -ComObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+$Shortcut.TargetPath       = $LauncherPath
+$Shortcut.WorkingDirectory = $env:USERPROFILE
+$Shortcut.WindowStyle      = 1
+$Shortcut.IconLocation     = $TerminalIcon
+$Shortcut.Description      = "Cross-platform, multi-provider autonomous AI engineering assistant for your terminal"
+$Shortcut.Save()
+Write-Host "[+] Start Menu shortcut created" -ForegroundColor Green
+
+# ---------------------------------------------------------------------
+# 6. REGISTER EXPLORER CONTEXT MENU ("Open with Termind")
+# ---------------------------------------------------------------------
+Write-Host "[*] Adding 'Open with Termind' to Explorer context menu..." -ForegroundColor Cyan
+
+# 6.1. Right-click on empty space inside a folder (Background)
+$BgKey = "HKCU:\Software\Classes\Directory\Background\shell\Termind"
+New-Item -Path $BgKey -Force | Out-Null
+Set-ItemProperty -Path $BgKey -Name "(Default)" -Value "Open with Termind"
+Set-ItemProperty -Path $BgKey -Name "Icon" -Value $TerminalIcon
+$BgCmdKey = Join-Path $BgKey "command"
+New-Item -Path $BgCmdKey -Force | Out-Null
+Set-ItemProperty -Path $BgCmdKey -Name "(Default)" -Value "`"$LauncherPath`""
+
+# 6.2. Right-click on a folder icon
+$DirKey = "HKCU:\Software\Classes\Directory\shell\Termind"
+New-Item -Path $DirKey -Force | Out-Null
+Set-ItemProperty -Path $DirKey -Name "(Default)" -Value "Open with Termind"
+Set-ItemProperty -Path $DirKey -Name "Icon" -Value $TerminalIcon
+$DirCmdKey = Join-Path $DirKey "command"
+New-Item -Path $DirCmdKey -Force | Out-Null
+Set-ItemProperty -Path $DirCmdKey -Name "(Default)" -Value "`"$LauncherPath`" `"%V\.`""
+
+Write-Host "[+] Explorer context menu registered" -ForegroundColor Green
 
 Write-Host "`nDone!`n" -ForegroundColor Green

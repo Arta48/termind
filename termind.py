@@ -98,7 +98,14 @@ except ImportError:
 # 2. CONFIGURATION, CONSTANTS & SESSION STATE
 # =====================================================================
 
-WORKSPACE_DIR = os.path.realpath(os.getcwd())
+if len(sys.argv) > 1:
+    if not os.path.isdir(sys.argv[1]):
+        print(f"\033[91m[Error: '{sys.argv[1]}' is not a valid directory]\033[0m")
+        sys.exit(1)
+    WORKSPACE_DIR = os.path.realpath(sys.argv[1])
+    os.chdir(WORKSPACE_DIR)  # Physical process switch to target directory
+else:
+    WORKSPACE_DIR = os.path.realpath(os.getcwd())
 
 MAX_TOOL_STEPS = 40
 MAX_READ_LINES = 1000

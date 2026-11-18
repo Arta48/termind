@@ -56,6 +56,44 @@ sha256sums=(
     "SKIP"
 )
 
+prepare() {
+    cd "${srcdir}"
+
+    # Creating desktop entry file
+    cat > "${pkgname}.desktop" <<_DESKTOP_EOF
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Termind
+Comment=Cross-platform, multi-provider autonomous AI engineering assistant for your terminal
+Exec=termind %U
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;Utility;ConsoleOnly;
+StartupWMClass=termind
+Keywords=ai;agent;terminal;cli;developer;assistant;gemini;claude;openai;deepseek;ollama;
+MimeType=inode/directory;
+_DESKTOP_EOF
+
+    # Creating Dolphin Service Menu
+    cat > "${pkgname}-servicemenu.desktop" <<_SERVICEMENU_EOF
+[Desktop Entry]
+Icon=utilities-terminal
+Type=Service
+Actions=OpenInTermind
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=inode/directory;
+Terminal=true
+StartupWMClass=termind
+
+[Desktop Action OpenInTermind]
+Name=Open with Termind
+Name[ru]=Открыть в Termind
+Icon=utilities-terminal
+Exec=termind %U
+_SERVICEMENU_EOF
+}
+
 package() {
     cd "${srcdir}"
 
@@ -70,6 +108,12 @@ package() {
     install -d "${pkgdir}/usr/bin"
     printf '#!/bin/sh\nexec python /opt/%s/termind.py "$@"\n' "${pkgname}" > "${pkgdir}/usr/bin/${pkgname}"
     chmod 755 "${pkgdir}/usr/bin/${pkgname}"
+
+    # Installing desktop file
+    install -Dm644 "${pkgname}.desktop" "${pkgdir}/usr/share/applications/${pkgname}.desktop"
+
+    # Installing Dolphin Service Menu
+    install -Dm644 "${pkgname}-servicemenu.desktop" "${pkgdir}/usr/share/kio/servicemenus/${pkgname}.desktop"
 }
 EOF
 

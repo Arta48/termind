@@ -114,6 +114,9 @@ export OPENROUTER_API_KEY="your_openrouter_key"
 $env:GEMINI_API_KEY="your_gemini_key"
 $env:OPENAI_API_KEY="your_openai_key"
 $env:DEEPSEEK_API_KEY="your_deepseek_key"
+$env:ANTHROPIC_API_KEY="your_anthropic_key"
+$env:GROQ_API_KEY="your_groq_key"
+$env:OPENROUTER_API_KEY="your_openrouter_key"
 ```
 
 *(Alternatively, you can configure API keys and custom endpoints dynamically at runtime using `/key` and `/base_url`.)*
