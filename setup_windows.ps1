@@ -91,17 +91,6 @@ if ($Uninstall) {
 # ---------------------------------------------------------------------
 # PRE-CHECKS & PYTHON 3.11+ DISCOVERY
 # ---------------------------------------------------------------------
-if (-not (Test-Path "termind" -PathType Container)) {
-    Write-Error "Error: 'termind' package directory not found. Run this script from the root of the termind repository!"
-    exit 1
-}
-foreach ($reqFile in @("pyproject.toml", "README.md", "LICENSE")) {
-    if (-not (Test-Path $reqFile)) {
-        Write-Error "Error: '$reqFile' not found. Run this script from the root of the termind repository!"
-        exit 1
-    }
-}
-
 function Find-ValidPython {
     $Candidates = @(
         @{ Exe = "py";      Arg = "-3" },
@@ -175,6 +164,8 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir     | Out-Null
 
 Copy-Item "pyproject.toml", "README.md", "LICENSE" -Destination $InstallDir -Force
+$Icon = Join-Path $InstallDir "icon.ico"
+Copy-Item "assets\icon.ico" -Destination $Icon -Force
 
 # ---------------------------------------------------------------------
 # 2. CREATE ISOLATED VENV & INSTALL DEPENDENCIES
@@ -222,37 +213,6 @@ $LauncherContent = "@echo off`r`nset PYTHONUTF8=1`r`n`"$VenvPython`" -P -m termi
 # ---------------------------------------------------------------------
 Update-UserPath -TargetDir $BinDir -Mode Add
 
-# =====================================================================
-# RESOLVE TERMINAL ICON (Windows Terminal with fallback to cmd.exe)
-# =====================================================================
-function Get-TerminalIcon {
-    $CachedIcon = Join-Path $InstallDir "termind.ico"
-    $wtApp = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($wtApp -and $wtApp.InstallLocation) {
-        $pngPath = Join-Path $wtApp.InstallLocation "Images\Square44x44Logo.targetsize-256.png"
-        if (Test-Path $pngPath) {
-            try {
-                $pngBytes = [System.IO.File]::ReadAllBytes($pngPath)
-                $len = $pngBytes.Length
-                $icoHeader = [byte[]]@(
-                    0,0, 1,0, 1,0,                    # ICONDIR: Reserved, Type=1, Count=1
-                    0, 0, 0, 0, 1,0, 32,0,           # Entry: Width=0(256), Height=0(256), Colors=0, Planes=1, Bits=32
-                    ($len -band 0xFF), (($len -shr 8) -band 0xFF), (($len -shr 16) -band 0xFF), (($len -shr 24) -band 0xFF), # Size (4 bytes)
-                    22,0,0,0                         # Offset (22 bytes from start)
-                )
-                $fs = New-Object System.IO.FileStream($CachedIcon, [System.IO.FileMode]::Create)
-                $fs.Write($icoHeader, 0, $icoHeader.Length)
-                $fs.Write($pngBytes, 0, $pngBytes.Length)
-                $fs.Close()
-                return $CachedIcon
-            } catch {}
-        }
-    }
-    return "$env:SystemRoot\System32\cmd.exe,0"
-}
-
-$TerminalIcon = Get-TerminalIcon
-
 # ---------------------------------------------------------------------
 # 5. CREATE START MENU SHORTCUT (.lnk)
 # ---------------------------------------------------------------------
@@ -265,7 +225,7 @@ $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
 $Shortcut.TargetPath       = $LauncherPath
 $Shortcut.WorkingDirectory = $env:USERPROFILE
 $Shortcut.WindowStyle      = 1
-$Shortcut.IconLocation     = $TerminalIcon
+$Shortcut.IconLocation     = $Icon
 $Shortcut.Description      = "Cross-platform, multi-provider autonomous AI engineering assistant for your terminal"
 $Shortcut.Save()
 Write-Host "[+] Start Menu shortcut created" -ForegroundColor Green
@@ -279,7 +239,7 @@ Write-Host "[*] Adding 'Open with Termind' to Explorer context menu..." -Foregro
 $BgKey = "HKCU:\Software\Classes\Directory\Background\shell\Termind"
 New-Item -Path $BgKey -Force | Out-Null
 Set-ItemProperty -Path $BgKey -Name "(Default)" -Value "Open with Termind"
-Set-ItemProperty -Path $BgKey -Name "Icon" -Value $TerminalIcon
+Set-ItemProperty -Path $BgKey -Name "Icon" -Value $Icon
 $BgCmdKey = Join-Path $BgKey "command"
 New-Item -Path $BgCmdKey -Force | Out-Null
 Set-ItemProperty -Path $BgCmdKey -Name "(Default)" -Value "`"$LauncherPath`""
@@ -288,7 +248,7 @@ Set-ItemProperty -Path $BgCmdKey -Name "(Default)" -Value "`"$LauncherPath`""
 $DirKey = "HKCU:\Software\Classes\Directory\shell\Termind"
 New-Item -Path $DirKey -Force | Out-Null
 Set-ItemProperty -Path $DirKey -Name "(Default)" -Value "Open with Termind"
-Set-ItemProperty -Path $DirKey -Name "Icon" -Value $TerminalIcon
+Set-ItemProperty -Path $DirKey -Name "Icon" -Value $Icon
 $DirCmdKey = Join-Path $DirKey "command"
 New-Item -Path $DirCmdKey -Force | Out-Null
 Set-ItemProperty -Path $DirCmdKey -Name "(Default)" -Value "`"$LauncherPath`" `"%V\.`""

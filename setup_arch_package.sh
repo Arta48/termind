@@ -6,11 +6,6 @@ if [[ "$(uname)" != "Linux" ]] || ! command -v pacman > /dev/null; then
     exit 1
 fi
 
-if [[ ! -d termind ]] || [[ ! -f pyproject.toml ]] || [[ ! -f LICENSE ]] || [[ ! -f README.md ]]; then
-    echo "Error: Run this script from the root of the termind repository!"
-    exit 1
-fi
-
 # Request sudo privileges upfront
 sudo echo > /dev/null
 
@@ -18,6 +13,7 @@ sudo echo > /dev/null
 rm -rf termind_pkg
 mkdir -p termind_pkg
 tar --exclude='__pycache__' --exclude='*.py[cod]' -czf termind_pkg/termind-src.tar.gz termind pyproject.toml
+cp assets/icon.png termind_pkg/icon.png
 cp README.md LICENSE termind_pkg/
 cd termind_pkg
 
@@ -48,6 +44,7 @@ optdepends=(
 )
 source=(
     "termind-src.tar.gz"
+    "icon.png"
     "README.md"
     "LICENSE"
 )
@@ -55,10 +52,17 @@ sha256sums=(
     "SKIP"
     "SKIP"
     "SKIP"
+    "SKIP"
 )
 
 prepare() {
     cd "${srcdir}"
+
+    # Generate icons of different sizes
+    sizes=("16" "24" "32" "48" "64" "128" "256")
+    for size in "${sizes[@]}"; do
+        magick icon.png -resize "${size}x${size}" -gravity center -background transparent -extent "${size}x${size}" "icon-${size}.png"
+    done
 
     # Creating desktop entry file
     cat > "${pkgname}.desktop" <<_DESKTOP_EOF
@@ -68,7 +72,7 @@ Type=Application
 Name=Termind
 Comment=Cross-platform, multi-provider autonomous AI engineering assistant for your terminal
 Exec=termind %U
-Icon=utilities-terminal
+Icon=${pkgname}
 Terminal=true
 Categories=Development;Utility;ConsoleOnly;
 StartupWMClass=${pkgname}
@@ -79,7 +83,7 @@ _DESKTOP_EOF
     # Creating Dolphin Service Menu
     cat > "${pkgname}-servicemenu.desktop" <<_SERVICEMENU_EOF
 [Desktop Entry]
-Icon=utilities-terminal
+Icon=${pkgname}
 Type=Service
 Actions=OpenInTermind
 ServiceTypes=KonqPopupMenu/Plugin
@@ -90,7 +94,7 @@ StartupWMClass=${pkgname}
 [Desktop Action OpenInTermind]
 Name=Open with Termind
 Name[ru]=Открыть в Termind
-Icon=utilities-terminal
+Icon=${pkgname}
 Exec=termind %U
 _SERVICEMENU_EOF
 }
@@ -110,6 +114,12 @@ package() {
     install -d "${pkgdir}/usr/bin"
     printf '#!/bin/sh\nexec python -P -c "import sys; sys.path.insert(0, '\''/opt/%s'\''); from termind.cli import main; main()" "$@"\n' "${pkgname}" > "${pkgdir}/usr/bin/${pkgname}"
     chmod 755 "${pkgdir}/usr/bin/${pkgname}"
+
+    # Installing Icons
+    sizes=("16" "24" "32" "48" "64" "128" "256")
+    for size in "${sizes[@]}"; do
+        install -Dm644 "icon-${size}.png" "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/${pkgname}.png"
+    done
 
     # Installing desktop file
     install -Dm644 "${pkgname}.desktop" "${pkgdir}/usr/share/applications/${pkgname}.desktop"
