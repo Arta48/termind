@@ -1,5 +1,7 @@
 # Termind
 
+![Termind Preview](assets/Pictures/termind_preview.png)
+
 A cross-platform, multi-provider autonomous AI engineering assistant for your terminal (**Linux**, **Windows**, and **macOS**). Built with a hybrid native engine architecture to preserve genuine Chain-of-Thought (reasoning) streams, enforce workspace security sandboxing, and provide live Markdown rendering.
 
 ---
